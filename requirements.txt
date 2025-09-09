@@ -1,3 +1,6 @@
 pipecat-ai[google,openai,aws]
 python-dotenv
 loguru
+sounddevice
+soundfile
+numpy

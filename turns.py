@@ -84,7 +84,7 @@ I hope these updated suggestions are helpful for planning your day on June 5th! 
     # 11
     {
         "input": "My suggestion is for a session about open telemetry tracing.",
-        "golden_text": "",
+        "golden_text": "Thank you, Jennifer! I've submitted your suggestion for a session on open telemetry tracing. Is there anything else I can help you with today?",
         "required_function_call": {
             "name": "submit_session_suggestion",
             "args": {
@@ -96,16 +96,10 @@ I hope these updated suggestions are helpful for planning your day on June 5th! 
             "status": "success",
         },
     },
-    # 12 - Function call submission
-    {
-        "input": "",
-        "golden_text": "Thank you, Jennifer! I've submitted your suggestion for a session on open telemetry tracing. Is there anything else I can help you with today?",
-        "required_function_call": None,
-    },
-    # 13
+    # 12
     {
         "input": "Oh, one more suggestion. How about a session on state machine abstractions for complex workflows?.",
-        "golden_text": "",
+        "golden_text": "Thank you, Jennifer! I've submitted your suggestion for a session on state machine abstractions for complex workflows. Is there anything else I can help you with today?",
         "required_function_call": {
             "name": "submit_session_suggestion",
             "args": {
@@ -117,28 +111,22 @@ I hope these updated suggestions are helpful for planning your day on June 5th! 
             "status": "success",
         },
     },
-    # 14 - Function call submission
-    {
-        "input": "",
-        "golden_text": "Got it! I've also submitted your suggestion for a session on state machine abstractions for complex workflows. Thank you for your valuable input! Can I help with anything else?",
-        "required_function_call": None,
-    },
-    # 15
+    # 13
     {
         "input": "Thanks for submitting both session suggestions. Is there food at the conference?",
         "golden_text": "Yes, meals are provided throughout the conference. Continental breakfast and lunch are available on all three days, June 3rd through the 5th. There are also morning and afternoon breaks with refreshments, a Welcome Reception on the evening of the 3rd, and an afterparty on the evening of the 4th.",
         "required_function_call": None,
     },
-    # 16
+    # 14
     {
         "input": "Will there be vegan options?",
         "golden_text": "Of course! I can submit a dietary request to ensure there are vegan options available for you. I have your name as Jennifer Smith. Is that correct?",
         "required_function_call": None,
     },
-    # 17
+    # 15
     {
         "input": "Yes.",
-        "golden_text": "",
+        "golden_text": "Thank you, Jennifer. I've submitted your request for vegan meals. Is there anything else I can help you with today?",
         "required_function_call": {
             "name": "submit_dietary_request",
             "args": {"name": "Jennifer Smith", "dietary_preference": "vegan"},
@@ -147,22 +135,16 @@ I hope these updated suggestions are helpful for planning your day on June 5th! 
             "status": "success",
         },
     },
-    # 18 - Function call submission
-    {
-        "input": "",
-        "golden_text": "Thank you, Jennifer. I've submitted your request for vegan meals. Is there anything else I can help you with today?",
-        "required_function_call": None,
-    },
-    # 19
+    # 16
     {
         "input": "Yes. I'm having trouble with the mobile app.",
         "golden_text": "I'm sorry to hear you're having trouble. I can create a tech support ticket for you. What seems to be the problem with the mobile app?",
         "required_function_call": None,
     },
-    # 20
+    # 17
     {
         "input": "I can't access the location maps.",
-        "golden_text": "",
+        "golden_text": "Thank you, Jennifer. I've created a tech support ticket for you regarding the issue with accessing location maps on the mobile app. Someone from our tech team will look into it. Is there anything else I can help you with?",
         "required_function_call": {
             "name": "request_tech_support",
             "args": {
@@ -174,31 +156,19 @@ I hope these updated suggestions are helpful for planning your day on June 5th! 
             "status": "success",
         },
     },
-    # 21 - Function call submission
-    {
-        "input": "",
-        "golden_text": "Thank you, Jennifer. I've created a tech support ticket for you regarding the issue with accessing location maps on the mobile app. Someone from our tech team will look into it. Is there anything else I can help you with?",
-        "required_function_call": None,
-    },
-    # 22
-    {
-        "input": "",
-        "golden_text": "",
-        "required_function_call": None,
-    },
-    # 23
+    # 18
     {
         "input": "I know this is a silly question, but what day is it today?",
         "golden_text": "I'm the voice assistant for the AI Engineer World's Fair 2025, and I can only answer questions about the event. How can I help you with the fair today?",
         "required_function_call": None,
     },
-    # 24
+    # 19
     {
         "input": "Well, since I can't access the mobile maps, can you tell me how to get to Salon 2?",
         "golden_text": "I understand you're looking for Salon 2 since the maps in the app aren't working for you. Unfortunately, I don't have the ability to provide directions or information about specific locations within the venue. The tech support team has been notified about the app issue. Can I help you with any information about the sessions or speakers instead?",
         "required_function_call": None,
     },
-    # 25
+    # 20
     {
         "input": "Is there a talk by Charles Frye?",
         "golden_text": """Yes, Charles Frye is speaking at the conference. He has two sessions on June 4th.
@@ -210,19 +180,19 @@ Then, at 12:45 PM, he's giving a talk titled **"How fast are LLM inference engin
 Both are part of the AI in Action track.""",
         "required_function_call": None,
     },
-    # 26
+    # 21
     {
         "input": "Where is the second one?",
         "golden_text": """That talk, "How fast are LLM inference engines anyway?", will be in the Juniper: Expo Sessions room.""",
         "required_function_call": None,
     },
-    # 27
+    # 22
     {
         "input": "I heard that there's some way to vote for our favorite talk of the conference. Is that true?",
         "golden_text": "Yes, that's correct! You can vote for your favorite sessions. I can help you with that. I'll just need the Session ID for the talk you'd like to vote for. I already have your name as Jennifer Smith.",
         "required_function_call": None,
     },
-    # 28
+    # 23
     {
         "input": "I don't know the session ID, but the talk was by Harald Kirschner.",
         "golden_text": """Of course. Harald Kirschner is involved in three sessions. Could you please tell me which one you'd like to vote for?
@@ -232,10 +202,10 @@ Both are part of the AI in Action track.""",
 *   And third, the talk on June 5th is titled: **"Vibe Coding at Scale: Customizing AI Assistants for Enterprise Environments."**""",
         "required_function_call": None,
     },
-    # 29
+    # 24
     {
         "input": "I'd like to vote for the one about vibe coding.",
-        "golden_text": "",
+        "golden_text": "Thank you, Jennifer! I've submitted your vote for the session on Vibe Coding at Scale: Customizing AI Assistants for Enterprise Environments. Is there anything else I can help you with today?",
         "required_function_call": {
             "name": "vote_for_session",
             "args": {"session_id": "936902", "name": "Jennifer Smith"},
@@ -244,13 +214,31 @@ Both are part of the AI in Action track.""",
             "status": "success",
         },
     },
-    # 30 - Function call submission
+    # 25
     {
-        "input": "",
-        "golden_text": "Thank you, Jennifer! I've submitted your vote for the session on Vibe Coding at Scale: Customizing AI Assistants for Enterprise Environments. Is there anything else I can help you with today?",
+        "input": "Yes — what time is lunch on June 5th?",
+        "golden_text": "Lunch on June 5th is from 12:00 PM to 2:00 PM in Salons 9–15: Expo Hall.",
         "required_function_call": None,
     },
-    # 31
+    # 26
+    {
+        "input": "Could you also confirm if there's an afterparty on June 4th?",
+        "golden_text": "Yes. The Toolbit Afterparty is on June 4th from 5:15 PM to 7:00 PM in Salons 9–15: Expo Hall.",
+        "required_function_call": None,
+    },
+    # 27
+    {
+        "input": "Are there community meetups on the evening of June 5th?",
+        "golden_text": "Yes. Community Meetups take place on June 5th from 5:30 PM to 9:00 PM in the Atrium: Event Hub.",
+        "required_function_call": None,
+    },
+    # 28
+    {
+        "input": "One last detail: when is continental breakfast on June 4th?",
+        "golden_text": "On June 4th, continental breakfast is available from 7:15 AM to 9:55 AM in the Grand Assembly.",
+        "required_function_call": None,
+    },
+    # 29
     {
         "input": "I just wanted to say the conference was great. I don't have anything else.",
         "golden_text": "Thank you for your feedback, Jennifer! I'm so glad you enjoyed the conference. Have a great day",

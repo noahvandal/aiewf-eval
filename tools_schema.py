@@ -3,7 +3,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 # 1. End Session
 end_session_function = FunctionSchema(
-    name="end_session", description="End the current session.", properties={}, required=None
+    name="end_session", description="End the current session.", properties={}, required=[]
 )
 
 # 2. Submit Dietary Request

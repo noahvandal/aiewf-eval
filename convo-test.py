@@ -20,6 +20,8 @@ from pipecat.frames.frames import (
     CancelFrame,
     LLMFullResponseEndFrame,
     TranscriptionMessage,
+    LLMRunFrame,
+    LLMMessagesAppendFrame,
 )
 from pipecat.metrics.metrics import (
     LLMUsageMetricsData,
@@ -28,6 +30,9 @@ from pipecat.metrics.metrics import (
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.gemini_multimodal_live.gemini import (
+    GeminiMultimodalLiveLLMService,
+)
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai_realtime.openai import OpenAIRealtimeLLMService
 from pipecat.services.openai_realtime import events as rt_events
@@ -63,7 +68,13 @@ logger.info("Starting conversation test...")
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+    # Use timezone-aware UTC to avoid deprecation warnings
+    try:
+        from datetime import UTC
+        return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except Exception:
+        # Fallback for older Python versions
+        return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
 class RunRecorder:
@@ -226,6 +237,12 @@ async def main():
         n = (name or "").lower()
         return n.startswith("gemini") or n.startswith("gemma")
 
+    def is_gemini_live_model(name: str) -> bool:
+        n = (name or "").lower()
+        return n.startswith("gemini") and (
+            "live" in n or "native-audio-dialog" in n
+        )
+
     def is_openrouter_model(name: str) -> bool:
         n = (name or "").lower()
         return (
@@ -246,7 +263,20 @@ async def main():
     extra = {"user": os.getenv("EVAL_USER", "eval-runner")}
     llm = None
 
-    if is_google_model(model_name):
+    if is_gemini_live_model(model_name):
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise EnvironmentError("GOOGLE_API_KEY is required for Gemini Live models")
+        # Gemini Live expects fully-qualified model ids like "models/<id>"
+        m = model_name if model_name.startswith("models/") else f"models/{model_name}"
+        llm = GeminiMultimodalLiveLLMService(
+            api_key=api_key,
+            model=m,
+            system_instruction=system_instruction,
+            tools=ToolsSchemaForTest,
+        )
+        llm.register_function(None, function_catchall)
+    elif is_google_model(model_name):
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise EnvironmentError("GOOGLE_API_KEY is required for Google models")
@@ -335,7 +365,7 @@ async def main():
     recorder = RunRecorder(model_name=model_name)
     recorder.start_turn(turn_idx)
 
-    if is_openai_realtime_model(model_name):
+    if is_openai_realtime_model(model_name) or is_gemini_live_model(model_name):
         messages = []
     else:
         messages = [
@@ -401,18 +431,19 @@ async def main():
             await asyncio.sleep(0.10)
             logger.info(f"!!!!!! User input: {turns[turn_idx]['input']}")
             logger.info(f"!!!!!! Context: {context}")
-            context.add_messages([{"role": "user", "content": turns[turn_idx]["input"]}])
-            last_msg_idx = len(context.get_messages())
 
-            if is_openai_realtime_model(model_name):
-                # Push audio for this turn if present; otherwise fall back
+            # For non-live models, keep local context in sync and trigger a run.
+            # For Gemini Live, do NOT pre-add the user message here; instead send
+            # an LLMMessagesAppendFrame so the service generates a single response.
+            if not (is_openai_realtime_model(model_name) or is_gemini_live_model(model_name)):
+                context.add_messages([{"role": "user", "content": turns[turn_idx]["input"]}])
+                last_msg_idx = len(context.get_messages())
+                await task.queue_frames([LLMRunFrame()])
+            else:
+                # Live speech models: prefer audio if available; else fall back to
+                # appropriate text triggering per service.
                 audio_path = turns[turn_idx].get("audio_file")
-                if not audio_path:
-                    logger.warning(
-                        f"No audio_file for turn {turn_idx}; sending text context frame instead."
-                    )
-                    await task.queue_frames([context_aggregator.user().get_context_frame()])
-                else:
+                if audio_path:
                     try:
                         assert paced_input is not None
                         paced_input.enqueue_wav_file(audio_path)
@@ -420,9 +451,34 @@ async def main():
                         logger.exception(
                             f"Failed to queue audio for turn {turn_idx} from {audio_path}: {e}"
                         )
-                        await task.queue_frames([context_aggregator.user().get_context_frame()])
-            else:
-                await task.queue_frames([context_aggregator.user().get_context_frame()])
+                        # Fall through to text path if audio fails
+                        audio_path = None
+
+                if not audio_path:
+                    if is_gemini_live_model(model_name):
+                        # Append the user message and let Gemini Live create a single response.
+                        await task.queue_frames(
+                            [
+                                LLMMessagesAppendFrame(
+                                    messages=[
+                                        {
+                                            "role": "user",
+                                            "content": turns[turn_idx]["input"],
+                                        }
+                                    ],
+                                    run_llm=False,
+                                )
+                            ]
+                        )
+                        # The aggregator will add one user message to context internally.
+                        # We keep last_msg_idx as-is; next EOT will capture assistant-only deltas.
+                    else:
+                        # OpenAI Realtime fallback: trigger a run with current context
+                        context.add_messages(
+                            [{"role": "user", "content": turns[turn_idx]["input"]}]
+                        )
+                        last_msg_idx = len(context.get_messages())
+                        await task.queue_frames([LLMRunFrame()])
         else:
             logger.info("Conversation complete")
             recorder.write_summary()
@@ -444,7 +500,7 @@ async def main():
         global recorder
         return recorder
 
-    if is_openai_realtime_model(model_name):
+    if is_openai_realtime_model(model_name) or is_gemini_live_model(model_name):
         # Create a paced input transport set to match the first audio file's sample rate (default 24000 Hz)
         default_sr = 24000
         t0_audio = turns[0].get("audio_file")
@@ -516,16 +572,26 @@ async def main():
             logger.info("!!!!!! OpenAI Realtime model - queued paced audio for first turn")
         except Exception as e:
             logger.exception(f"Failed to queue audio from {audio_path}: {e}")
-            await task.queue_frames([context_aggregator.user().get_context_frame()])
+            # Fall back to a text-triggered run
+            if is_gemini_live_model(model_name):
+                await task.queue_frames(
+                    [
+                        LLMMessagesAppendFrame(
+                            messages=[{"role": "user", "content": turns[0]["input"]}]
+                        )
+                    ]
+                )
+            else:
+                await task.queue_frames([LLMRunFrame()])
 
     # Queue first user turn
     last_msg_idx = len(messages)
-    if is_openai_realtime_model(model_name):
+    if is_openai_realtime_model(model_name) or is_gemini_live_model(model_name):
         # For Realtime, avoid sending a context frame that would force an early
         # response.create; let audio + explicit stop drive turn boundaries.
         asyncio.create_task(queue_audio_for_first_turn())
     else:
-        await task.queue_frames([context_aggregator.user().get_context_frame()])
+        await task.queue_frames([LLMRunFrame()])
 
     runner = PipelineRunner(handle_sigint=True)
     await runner.run(task)

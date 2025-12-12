@@ -329,6 +329,7 @@ async def main():
     # State tracking for reconnection handling
     current_turn_audio_path: Optional[str] = None  # Track current turn's audio for retry
     needs_turn_retry: bool = False  # Set True when reconnection happens mid-turn
+    reconnection_grace_until: float = 0  # Ignore transcript updates until this monotonic time
 
     if is_gemini_live_model(model_name):
         api_key = os.getenv("GOOGLE_API_KEY")
@@ -635,11 +636,17 @@ async def main():
 
             def on_gemini_reconnecting():
                 """Called when Gemini Live starts reconnecting due to session timeout."""
-                nonlocal needs_turn_retry
+                nonlocal needs_turn_retry, reconnection_grace_until
                 logger.info(f"Gemini reconnecting: pausing audio, turn {turn_idx} will be retried")
                 needs_turn_retry = True
                 # Pause audio input to avoid sending audio during reconnection
                 paced_input.pause()
+                # Clear the transcript buffer to discard partial responses from before reconnection
+                assistant_shim.clear_buffer()
+                # Set grace period to ignore stale TTSStoppedFrame events that arrive after reconnection
+                # These old frames can trigger end_of_turn prematurely with truncated responses
+                reconnection_grace_until = time.monotonic() + 10.0  # 10 second grace period
+                logger.info(f"Set reconnection grace period until {reconnection_grace_until}")
 
             def on_gemini_reconnected():
                 """Called when Gemini Live reconnection completes."""
@@ -653,7 +660,7 @@ async def main():
 
             async def retry_current_turn_after_reconnection():
                 """Re-queue the current turn's audio after reconnection."""
-                nonlocal needs_turn_retry, current_turn_audio_path
+                nonlocal needs_turn_retry, current_turn_audio_path, reconnection_grace_until
                 if not needs_turn_retry:
                     logger.info("No turn retry needed")
                     return
@@ -674,6 +681,11 @@ async def main():
                         paced_input.enqueue_wav_file(audio_path)
                         needs_turn_retry = False
                         logger.info(f"Successfully re-queued audio for turn {turn_idx}")
+                        # Wait for audio to finish playing (~2-3 seconds) plus model response time
+                        # before clearing grace period, to ensure all stale frames are filtered
+                        await asyncio.sleep(5.0)
+                        reconnection_grace_until = 0  # Clear grace period, accept new responses
+                        logger.info("Cleared reconnection grace period - accepting new transcript updates")
                     except Exception as e:
                         logger.exception(f"Failed to re-queue audio for turn {turn_idx}: {e}")
                 else:
@@ -688,6 +700,10 @@ async def main():
                         ]
                     )
                     needs_turn_retry = False
+                    # Clear grace period for text fallback too
+                    await asyncio.sleep(3.0)
+                    reconnection_grace_until = 0
+                    logger.info("Cleared reconnection grace period (text fallback)")
 
             # Set callbacks on the LLM
             llm._on_reconnecting = on_gemini_reconnecting
@@ -756,6 +772,11 @@ async def main():
     # Register event handler only for assistant transcript updates
     @assistant_shim.event_handler("on_transcript_update")
     async def on_transcript_update(processor, frame):
+        nonlocal reconnection_grace_until
+        # Check if we're in the reconnection grace period - ignore stale transcripts
+        if time.monotonic() < reconnection_grace_until:
+            logger.warning(f"Ignoring transcript update during reconnection grace period (until {reconnection_grace_until})")
+            return
         for msg in frame.messages:
             if isinstance(msg, TranscriptionMessage) and getattr(msg, "role", None) == "assistant":
                 timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""

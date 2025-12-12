@@ -1137,20 +1137,6 @@ June 5: Reasoning + RL, SWE-Agents, Evals, Retrieval + Search, Security, Generat
 
   ------------------------------------
 
-    Session ID: 933719
-    Track: AI in Action
-    Speaker: Charles Frye (Developer Advocate, Modal Labs)
-    Format: Workshop
-    Room: Foothill F: Infrastructure
-    Time: 4 Jun 2025 11:15 AM
-    Session Title: What every AI engineer needs to know about GPUs
-    Description:
-    Every programmer needs to know a few things about hardware, like processors, memory, and disks. Due to AI systems' extreme demand for mathematical processing power, AI engineers need to know a few things about GPUs -- the world's most popular high-throughput mathematical co-processor.
-    
-    In this talk, I will explain the fundamental engineering constraints and design decisions that shape GPUs and trace those up to some counter-intuitive facts about the performance characteristics of AI systems, with actionable insights for their deployers and consumers.
-
-  ------------------------------------
-
     Session ID: 936933
     Track: AI in Action
     Speaker: Nina Lopatina (Lead Developer Advocate)

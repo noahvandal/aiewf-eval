@@ -134,9 +134,11 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         self,
         endpointing_sensitivity: str = None,
         max_reconnect_attempts: int = 3,
+        max_context_turns: int = 15,
         on_reconnecting: Optional[Callable[[], None]] = None,
         on_reconnected: Optional[Callable[[], None]] = None,
         on_retriggered: Optional[Callable[[], None]] = None,
+        on_max_reconnects_exceeded: Optional[Callable[[], Any]] = None,
         **kwargs,
     ):
         """Initialize the Nova Sonic service.
@@ -147,9 +149,13 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
                 Only applicable to amazon.nova-2-sonic-v1:0 model.
                 Nova Sonic v1 does not support this parameter.
             max_reconnect_attempts: Maximum reconnection attempts before giving up.
+            max_context_turns: Maximum number of user/assistant turn pairs to keep during
+                reconnection. Older turns are truncated to avoid exceeding Nova Sonic's
+                context limits. System messages are always preserved.
             on_reconnecting: Callback when reconnection starts (pause audio input).
             on_reconnected: Callback when reconnection completes (resume audio input).
             on_retriggered: Callback after assistant response is re-triggered (signal turn detector).
+            on_max_reconnects_exceeded: Async callback when max reconnects exceeded (cancel task).
         """
         super().__init__(**kwargs)
         self._current_content_type = None
@@ -160,12 +166,14 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
 
         # Reconnection handling
         self._max_reconnect_attempts = max_reconnect_attempts
+        self._max_context_turns = max_context_turns
         self._reconnect_attempts = 0
         self._is_reconnecting = False
         self._need_retrigger_after_reconnect = False
         self._on_reconnecting = on_reconnecting
         self._on_reconnected = on_reconnected
         self._on_retriggered = on_retriggered
+        self._on_max_reconnects_exceeded = on_max_reconnects_exceeded
 
     def can_generate_metrics(self) -> bool:
         """Enable metrics generation for TTFB tracking.
@@ -180,21 +188,83 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         return self._is_reconnecting
 
     def reset_reconnect_counter(self):
-        """Reset the reconnection attempt counter (call on successful turn completion)."""
+        """Reset the reconnection attempt counter (call on successful turn completion).
+
+        Does NOT reset if currently reconnecting, to prevent race conditions where
+        a turn completes during reconnection and resets the counter mid-cycle.
+        """
+        if self._is_reconnecting:
+            logger.debug(
+                f"Not resetting reconnect counter during reconnection (current: {self._reconnect_attempts})"
+            )
+            return
         if self._reconnect_attempts > 0:
             logger.info(f"Resetting reconnect counter (was {self._reconnect_attempts})")
         self._reconnect_attempts = 0
 
+    def _truncate_context_for_reconnection(self):
+        """Truncate context for reconnection to fit within Nova Sonic's limits.
+
+        Nova Sonic has strict context limits during session reconnection.
+        Strategy: Keep full system prompt (with KB) but only the most recent user message.
+        This preserves the knowledge base for accurate answers while minimizing history.
+
+        Returns the number of messages removed, or 0 if no truncation was needed.
+        """
+        if not self._context:
+            return 0
+
+        messages = self._context.get_messages()
+        if not messages:
+            return 0
+
+        # Separate system messages from conversation messages
+        system_messages = []
+        conversation_messages = []
+        for msg in messages:
+            role = msg.get("role", "")
+            if role == "system":
+                system_messages.append(msg)
+            else:
+                conversation_messages.append(msg)
+
+        # Find the most recent user message
+        recent_user_message = None
+        for msg in reversed(conversation_messages):
+            if msg.get("role") == "user":
+                recent_user_message = msg
+                break
+
+        messages_removed = len(conversation_messages)
+        if recent_user_message:
+            messages_removed -= 1  # We're keeping one message
+
+        if messages_removed > 0:
+            logger.warning(
+                f"Truncating context for reconnection: keeping full system prompt + "
+                f"most recent user message. Removing {messages_removed} conversation messages."
+            )
+
+        # Rebuild: system messages + only the most recent user message
+        new_messages = system_messages.copy()
+        if recent_user_message:
+            new_messages.append(recent_user_message)
+
+        # Update the context with truncated messages
+        self._context.set_messages(new_messages)
+        return messages_removed
+
     async def reset_conversation(self):
-        """Override to add retry limits and preserve trigger state.
+        """Override to add retry limits, context truncation, and preserve trigger state.
 
         The base class calls this automatically when errors occur in the receive task.
         Without retry limits, connection errors can cascade infinitely.
 
         Key improvements:
         1. Retry limits - gives up after max_reconnect_attempts
-        2. Preserves trigger state - re-triggers assistant response after reconnection
-        3. Callbacks - notifies external components to pause/resume audio input
+        2. Context truncation - removes old messages to fit within Nova Sonic limits
+        3. Preserves trigger state - re-triggers assistant response after reconnection
+        4. Callbacks - notifies external components to pause/resume audio input
         """
         # Check retry limit
         if self._reconnect_attempts >= self._max_reconnect_attempts:
@@ -206,6 +276,15 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
                 error_msg=f"Nova Sonic: Max reconnect attempts ({self._max_reconnect_attempts}) exceeded"
             )
             self._wants_connection = False
+
+            # Call the max reconnects exceeded callback to terminate gracefully
+            if self._on_max_reconnects_exceeded:
+                try:
+                    result = self._on_max_reconnects_exceeded()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as e:
+                    logger.exception(f"Error in on_max_reconnects_exceeded callback: {e}")
             return
 
         self._reconnect_attempts += 1
@@ -224,6 +303,11 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
             f"Nova Sonic: Will re-trigger after reconnect: {self._need_retrigger_after_reconnect} "
             f"(triggering={self._triggering_assistant_response}, responding={self._assistant_is_responding})"
         )
+
+        # Truncate context to avoid exceeding Nova Sonic's limits during reconnection
+        messages_removed = self._truncate_context_for_reconnection()
+        if messages_removed > 0:
+            logger.info(f"Nova Sonic: Removed {messages_removed} old messages before reconnection")
 
         # Notify external components to pause audio input
         if self._on_reconnecting:
@@ -506,8 +590,13 @@ class NovaSonicTurnEndDetector(FrameProcessor):
         elif isinstance(frame, TTSAudioRawFrame):
             self._audio_frame_count += 1
             self._last_audio_time = time.monotonic()
-            # Start/restart audio completion check
-            self._start_audio_check()
+            # NOTE: We intentionally do NOT call _start_audio_check() here.
+            # Nova Sonic generates responses in multiple audio segments with
+            # 2+ second pauses between them. The audio silence detection would
+            # misinterpret these inter-segment gaps as "response complete" and
+            # trigger premature turn completion before AUDIO END_TURN arrives.
+            # Instead, we rely solely on NovaSonicTextTurnEndFrame (AUDIO END_TURN)
+            # as the authoritative turn completion signal.
 
         elif isinstance(frame, TTSStoppedFrame):
             # TTSStoppedFrame indicates the response audio is done
@@ -1170,10 +1259,19 @@ async def main(model_name: str, max_turns: Optional[int] = None, vad_sensitivity
         logger.info("Assistant response re-triggered after reconnection, signaling turn detector")
         turn_detector.signal_trigger_sent()
 
+    async def on_max_reconnects_exceeded():
+        """Called when max reconnection attempts exceeded - terminate gracefully."""
+        nonlocal done
+        logger.error("Max reconnect attempts exceeded - terminating pipeline")
+        done = True
+        recorder.write_summary()
+        await task.cancel()
+
     # Set the callbacks on the LLM (they're closures that capture paced_input and turn_detector)
     llm._on_reconnecting = on_reconnecting
     llm._on_reconnected = on_reconnected
     llm._on_retriggered = on_retriggered
+    llm._on_max_reconnects_exceeded = on_max_reconnects_exceeded
 
     # Recorder accessor for ToolCallRecorder
     def current_recorder():
@@ -1208,35 +1306,9 @@ async def main(model_name: str, max_turns: Optional[int] = None, vad_sensitivity
         ),
     )
 
-    @task.event_handler("on_error")
-    async def handle_task_error(error: ErrorFrame):
-        """Handle errors at the PipelineTask level.
-
-        NOTE: Reconnection is now handled automatically by our overridden
-        reset_conversation() in NovaSonicLLMServiceWithCompletionSignal.
-        This handler just logs errors and handles graceful termination
-        when max reconnect attempts are exceeded.
-        """
-        nonlocal done
-
-        error_msg = getattr(error, "error", "") or ""
-
-        # Check for max reconnect attempts exceeded
-        if "max reconnect attempts" in error_msg.lower():
-            logger.error(f"handle_task_error: Max reconnect attempts exceeded, terminating")
-            done = True
-            recorder.write_summary()
-            await task.cancel()
-            return
-
-        # Log all errors (reconnection is handled by LLM's reset_conversation)
-        if "timed out" in error_msg.lower():
-            logger.info(
-                f"handle_task_error: Nova Sonic timeout on turn {turn_idx}. "
-                f"Reconnection handled by LLM service."
-            )
-        else:
-            logger.warning(f"handle_task_error: Error: {error_msg[:200]}")
+    # NOTE: PipelineTask doesn't support @task.event_handler("on_error") - it never fires.
+    # Instead, we use the on_max_reconnects_exceeded callback in the LLM service to handle
+    # graceful termination when max reconnection attempts are exceeded.
 
     async def queue_first_turn(delay: float = 1.0):
         """Queue the first turn - send user question as AUDIO, then trigger."""

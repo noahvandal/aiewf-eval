@@ -170,7 +170,7 @@ turns = [{'input': "I'm trying to decide whether to come for workshop day. When 
                  'Then, at 12:45 PM, he\'s giving a talk titled **"How fast are LLM inference '
                  'engines anyway?"**\n'
                  '\n'
-                 'Both are part of the AI in Action track.',
+                 'The workshop is part of the Infrastructure track, and the talk is part of the AI in Action track.',
   'required_function_call': None,
   'audio_file': 'turns_audio/turn_020.wav'},
  {'input': 'Where is the second one?',

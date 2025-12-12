@@ -33,10 +33,8 @@ from pipecat.metrics.metrics import (
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.google.llm import GoogleLLMService
-from pipecat.services.gemini_multimodal_live.gemini import (
-    GeminiLiveLLMService,
-)
 from pipecat.services.google.gemini_live.llm import (
+    GeminiLiveLLMService,
     InputParams as GeminiLiveInputParams,
     GeminiVADParams,
 )
@@ -64,6 +62,78 @@ from scripts.tool_call_recorder import ToolCallRecorder
 load_dotenv()
 
 logger.info("Starting conversation test...")
+
+
+# -------------------------
+# GeminiLiveLLMService with Reconnection Callbacks
+# -------------------------
+
+
+class GeminiLiveLLMServiceWithReconnection(GeminiLiveLLMService):
+    """Extended Gemini Live service that exposes reconnection events.
+
+    The base GeminiLiveLLMService handles reconnection internally when the
+    10-minute session timeout occurs, but doesn't expose events for external
+    coordination. This subclass:
+
+    1. Calls on_reconnecting callback before disconnecting
+    2. Calls on_reconnected callback after reconnecting
+    3. Tracks whether we were in the middle of receiving a response
+
+    This allows the test harness to:
+    - Pause audio input during reconnection
+    - Re-queue the interrupted turn's audio after reconnection
+    - Reset turn tracking state
+    """
+
+    def __init__(
+        self,
+        on_reconnecting: Optional[Callable[[], None]] = None,
+        on_reconnected: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ):
+        """Initialize with optional reconnection callbacks.
+
+        Args:
+            on_reconnecting: Called before disconnecting during reconnection.
+                            Use this to pause audio input and save state.
+            on_reconnected: Called after reconnection completes.
+                           Use this to resume audio input and re-queue interrupted turn.
+        """
+        super().__init__(**kwargs)
+        self._on_reconnecting = on_reconnecting
+        self._on_reconnected = on_reconnected
+        self._reconnecting = False
+
+    def is_reconnecting(self) -> bool:
+        """Check if currently in the middle of a reconnection."""
+        return self._reconnecting
+
+    async def _reconnect(self):
+        """Override to call callbacks before/after reconnection."""
+        self._reconnecting = True
+
+        # Call on_reconnecting callback
+        if self._on_reconnecting:
+            try:
+                logger.info("GeminiLiveWithReconnection: Calling on_reconnecting callback")
+                self._on_reconnecting()
+            except Exception as e:
+                logger.warning(f"Error in on_reconnecting callback: {e}")
+
+        # Call parent reconnect implementation
+        try:
+            await super()._reconnect()
+        finally:
+            self._reconnecting = False
+
+        # Call on_reconnected callback
+        if self._on_reconnected:
+            try:
+                logger.info("GeminiLiveWithReconnection: Calling on_reconnected callback")
+                self._on_reconnected()
+            except Exception as e:
+                logger.warning(f"Error in on_reconnected callback: {e}")
 
 
 # -------------------------
@@ -256,6 +326,10 @@ async def main():
     extra = {"user": os.getenv("EVAL_USER", "eval-runner")}
     llm = None
 
+    # State tracking for reconnection handling
+    current_turn_audio_path: Optional[str] = None  # Track current turn's audio for retry
+    needs_turn_retry: bool = False  # Set True when reconnection happens mid-turn
+
     if is_gemini_live_model(model_name):
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
@@ -274,7 +348,10 @@ async def main():
         # from the context. If passed both here and in context, GeminiLiveLLMService
         # will reconnect on every context update, causing "Connected to Gemini service"
         # to appear on each turn.
-        llm = GeminiLiveLLMService(
+        #
+        # Use our custom subclass with reconnection callbacks to handle the 10-minute
+        # session timeout gracefully. Callbacks are set later after paced_input is created.
+        llm = GeminiLiveLLMServiceWithReconnection(
             api_key=api_key,
             model=m,
             params=gemini_live_params,
@@ -422,11 +499,14 @@ async def main():
     llm.register_function(None, function_catchall)
 
     async def end_of_turn(direct_assistant_text: str = None):
-        nonlocal turn_idx, last_msg_idx, done
+        nonlocal turn_idx, last_msg_idx, done, current_turn_audio_path, needs_turn_retry
         if done:
             logger.info("!!!! EOT top (done)")
             await llm.push_frame(CancelFrame())
             return
+
+        # Turn completed successfully - clear the retry flag
+        needs_turn_retry = False
 
         # For realtime models, use the direct text passed from transcript handler
         # For text models, context_aggregator.assistant() has already added the
@@ -468,6 +548,8 @@ async def main():
                 # Live speech models: prefer audio if available; else fall back to
                 # appropriate text triggering per service.
                 audio_path = turns[turn_idx].get("audio_file")
+                # Track current turn's audio path for reconnection recovery
+                current_turn_audio_path = audio_path
                 if audio_path:
                     try:
                         assert paced_input is not None
@@ -480,6 +562,7 @@ async def main():
                         audio_path = None
 
                 if not audio_path:
+                    current_turn_audio_path = None  # No audio for this turn
                     if is_gemini_live_model(model_name):
                         # Append the user message and let Gemini Live create a single response.
                         await task.queue_frames(
@@ -546,6 +629,69 @@ async def main():
             pre_roll_ms=100,
             continuous_silence=True,
         )
+
+        # Set up reconnection callbacks for Gemini Live to handle 10-minute session timeout
+        if is_gemini_live_model(model_name) and isinstance(llm, GeminiLiveLLMServiceWithReconnection):
+
+            def on_gemini_reconnecting():
+                """Called when Gemini Live starts reconnecting due to session timeout."""
+                nonlocal needs_turn_retry
+                logger.info(f"Gemini reconnecting: pausing audio, turn {turn_idx} will be retried")
+                needs_turn_retry = True
+                # Pause audio input to avoid sending audio during reconnection
+                paced_input.pause()
+
+            def on_gemini_reconnected():
+                """Called when Gemini Live reconnection completes."""
+                nonlocal needs_turn_retry
+                logger.info(f"Gemini reconnected: scheduling turn {turn_idx} retry")
+                # Resume audio input (signal_ready re-enables audio transmission)
+                paced_input.signal_ready()
+                # Schedule a task to re-queue the current turn's audio after a short delay
+                # This gives the connection time to stabilize
+                asyncio.create_task(retry_current_turn_after_reconnection())
+
+            async def retry_current_turn_after_reconnection():
+                """Re-queue the current turn's audio after reconnection."""
+                nonlocal needs_turn_retry, current_turn_audio_path
+                if not needs_turn_retry:
+                    logger.info("No turn retry needed")
+                    return
+
+                logger.info(f"Waiting 2s for connection to stabilize before retrying turn {turn_idx}")
+                await asyncio.sleep(2.0)
+
+                # Check if we still need to retry (might have been cleared by end_of_turn)
+                if not needs_turn_retry:
+                    logger.info("Turn retry cancelled (turn completed normally)")
+                    return
+
+                # Get the audio path for the current turn
+                audio_path = current_turn_audio_path or turns[turn_idx].get("audio_file")
+                if audio_path:
+                    logger.info(f"Re-queuing audio for turn {turn_idx}: {audio_path}")
+                    try:
+                        paced_input.enqueue_wav_file(audio_path)
+                        needs_turn_retry = False
+                        logger.info(f"Successfully re-queued audio for turn {turn_idx}")
+                    except Exception as e:
+                        logger.exception(f"Failed to re-queue audio for turn {turn_idx}: {e}")
+                else:
+                    logger.warning(f"No audio path available for turn {turn_idx}, falling back to text")
+                    # Fall back to text
+                    await task.queue_frames(
+                        [
+                            LLMMessagesAppendFrame(
+                                messages=[{"role": "user", "content": turns[turn_idx]["input"]}],
+                                run_llm=False,
+                            )
+                        ]
+                    )
+                    needs_turn_retry = False
+
+            # Set callbacks on the LLM
+            llm._on_reconnecting = on_gemini_reconnecting
+            llm._on_reconnected = on_gemini_reconnected
 
         class LLMFrameLogger(FrameProcessor):
             """Logs every frame emitted by the LLM stage and captures TTFB metrics."""
@@ -622,15 +768,19 @@ async def main():
                 await end_of_turn(direct_assistant_text=msg.content)
 
     async def queue_audio_for_first_turn(delay=1.0):
+        nonlocal current_turn_audio_path
         # Give the pipeline a moment to start, then enqueue paced audio
         await asyncio.sleep(delay)
         audio_path = turns[0].get("audio_file")
+        # Track current turn's audio path for reconnection recovery
+        current_turn_audio_path = audio_path
         try:
             assert paced_input is not None
             paced_input.enqueue_wav_file(audio_path)
             logger.info("!!!!!! OpenAI Realtime model - queued paced audio for first turn")
         except Exception as e:
             logger.exception(f"Failed to queue audio from {audio_path}: {e}")
+            current_turn_audio_path = None  # No audio for this turn
             # Fall back to a text-triggered run
             if is_gemini_live_model(model_name):
                 await task.queue_frames(

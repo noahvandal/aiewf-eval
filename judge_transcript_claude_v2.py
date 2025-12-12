@@ -84,11 +84,13 @@ For each turn, evaluate three dimensions:
 
 Output ONLY JSON objects, one per line, nothing else - no explanations, no markdown.
 
+IMPORTANT: Put "reasoning" FIRST in each JSON object. This ensures you think through your evaluation before committing to boolean scores.
+
 For turn 0, output:
-{"turn": 0, "tool_use_correct": true, "instruction_following": true, "kb_grounding": true, "reasoning": "explanation"}
+{"turn": 0, "reasoning": "explanation of your evaluation", "tool_use_correct": true, "instruction_following": true, "kb_grounding": true}
 
 For turn 1, output:
-{"turn": 1, "tool_use_correct": false, "instruction_following": true, "kb_grounding": true, "reasoning": "explanation"}
+{"turn": 1, "reasoning": "explanation of your evaluation", "tool_use_correct": false, "instruction_following": true, "kb_grounding": true}
 
 And so on for ALL turns. Start immediately with the JSON for turn 0.
 """

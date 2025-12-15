@@ -33,7 +33,7 @@ Speech-to-speech models:
 |   gpt-realtime                  | 267/300   | 265/300     | 300/300   | 92.4%     | 92.8%       | 818ms    |
 |   gemini-native-audio-12-2025   | 253/300   | 259/300     | 286/300   | 88.7%     | 90.0%       | N/A      |
 |   gemini-native-audio-09-2025   | 236/300   | 227/300     | 268/300   | 81.2%     | 89.4%       | 785ms    |
-| * amazon.nova-2-sonic-v1_0      | 278/300   | 265/300     | 296/300   | 93.2%     | 95.6%       | *        |
+| * amazon.nova-2-sonic-v1:0      | 278/300   | 265/300     | 296/300   | 93.2%     | 95.6%       | *        |
 ```
 
 Each conversation in this benchmark is 30 turns. The scores above are aggregated across 10 runs for each model. **Pass Rate** means the percentage of total turns across all runs that the judge model scored as successful. Each run is also scored independently. **Median Rate** is the median individual run pass rate. Think of pass rate as the model's average performance, and the median rate as a way to measure the model's consistency. The older gemini-native-audio-release, for example, often gave very good performance (89.4% median rate), but was prone to poor runs (81.2% pass rate). The newer release is much more consistent (the overall pass rate is much closer to the median rate).
@@ -120,7 +120,7 @@ uv run multi-turn-eval run aiwf_medium_context --model gpt-realtime --service op
 uv run multi-turn-eval run aiwf_medium_context --model gemini-2.5-flash-native-audio-preview-12-2025 --service gemini-live
 
 # Nova Sonic (no --service needed, pipeline creates its own LLM)
-uv run multi-turn-eval run aiwf_medium_context --model amazon.nova-sonic-v1:0 --pipeline nova-sonic
+uv run multi-turn-eval run aiwf_medium_context --model amazon.nova-2-sonic-v1:0 --pipeline nova-sonic
 
 # Debug with limited turns
 uv run multi-turn-eval run aiwf_medium_context --model gpt-4o --service openai --only-turns 0,1,2

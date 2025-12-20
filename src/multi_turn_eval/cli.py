@@ -38,6 +38,7 @@ SERVICE_ALIASES = {
     "bedrock": "pipecat.services.aws.llm.AWSBedrockLLMService",
     "groq": "pipecat.services.groq.llm.GroqLLMService",
     "cerebras": "pipecat.services.cerebras.llm.CerebrasLLMService",
+    "ultravox-realtime": "pipecat.services.ultravox.llm.UltravoxRealtimeLLMService",
 }
 
 
@@ -111,6 +112,8 @@ def infer_pipeline(model: str) -> str:
         return "realtime"
     if "native-audio" in m or "live" in m:
         return "realtime"
+    if "ultravox" in m:
+        return "realtime"
     if "nova-sonic" in m or "nova_sonic" in m:
         return "nova-sonic"
     return "text"
@@ -118,10 +121,16 @@ def infer_pipeline(model: str) -> str:
 
 def create_run_directory(benchmark_name: str, model: str) -> Path:
     """Create timestamped run directory."""
+    import uuid
+
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    # Add a short unique suffix to prevent collisions in parallel runs
+    unique_suffix = str(uuid.uuid4())[:8]
     # Sanitize model name for filesystem (replace / and :)
     safe_model = model.replace("/", "_").replace(":", "_")
-    run_dir = Path("runs") / benchmark_name / f"{timestamp}_{safe_model}"
+    run_dir = (
+        Path("runs") / benchmark_name / f"{timestamp}_{safe_model}_{unique_suffix}"
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 

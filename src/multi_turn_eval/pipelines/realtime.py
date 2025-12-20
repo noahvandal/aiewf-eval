@@ -3,6 +3,7 @@
 This pipeline works with speech-to-speech models that use audio input/output:
 - OpenAI Realtime (gpt-realtime)
 - Gemini Live (gemini-*-native-audio-*)
+- Ultravox (ultravox-v0.7)
 
 Pipeline:
     paced_input → context_aggregator.user() → transcript.user() →
@@ -16,9 +17,9 @@ import wave
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+import numpy as np
 import soundfile as sf
 from loguru import logger
-
 from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
@@ -27,25 +28,29 @@ from pipecat.frames.frames import (
     LLMMessagesAppendFrame,
     LLMRunFrame,
     MetricsFrame,
+    OutputAudioRawFrame,
     TranscriptionMessage,
 )
 from pipecat.metrics.metrics import TTFBMetricsData
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+)
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.frames.frames import OutputAudioRawFrame
-import numpy as np
 from pipecat.processors.transcript_processor import TranscriptProcessor
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.services.openai.realtime import events as rt_events
+from pipecat.services.ultravox.llm import OneShotInputParams
 from pipecat.transports.base_transport import TransportParams
 
 from multi_turn_eval.pipelines.base import BasePipeline
 from multi_turn_eval.processors.tool_call_recorder import ToolCallRecorder
-from multi_turn_eval.processors.tts_transcript import TTSStoppedAssistantTranscriptProcessor
+from multi_turn_eval.processors.tts_transcript import (
+    TTSStoppedAssistantTranscriptProcessor,
+)
 from multi_turn_eval.transports.null_audio_output import NullAudioOutputTransport
 from multi_turn_eval.transports.paced_input import PacedInputTransport
 
@@ -257,6 +262,13 @@ class RealtimePipeline(BasePipeline):
         m = self.model_name.lower()
         return "realtime" in m and m.startswith("gpt")
 
+    def _is_ultravox_realtime(self) -> bool:
+        """Check if current model is Ultravox Realtime."""
+        if not self.model_name:
+            return False
+        m = self.model_name.lower()
+        return "ultravox" in m
+
     def _get_audio_path_for_turn(self, turn_index: int) -> Optional[str]:
         """Get the audio file path for a turn.
 
@@ -280,9 +292,7 @@ class RealtimePipeline(BasePipeline):
         turn = self.effective_turns[turn_index]
         return turn.get("audio_file")
 
-    def _create_llm(
-        self, service_class: Optional[type], model: str
-    ) -> FrameProcessor:
+    def _create_llm(self, service_class: Optional[type], model: str) -> FrameProcessor:
         """Create LLM service with proper configuration for realtime models.
 
         For OpenAI Realtime, we must pass session_properties with turn_detection
@@ -321,6 +331,24 @@ class RealtimePipeline(BasePipeline):
                 system_instruction=system_instruction,
                 session_properties=session_props,
             )
+        elif "UltravoxRealtime" in class_name:
+            # Ultravox Realtime: Use OneShotInputParams
+            api_key = os.getenv("ULTRAVOX_API_KEY")
+            if not api_key:
+                raise EnvironmentError(
+                    "ULTRAVOX_API_KEY environment variable is required"
+                )
+
+            params = OneShotInputParams(
+                api_key=api_key,
+                system_prompt=system_instruction,
+                temperature=1.0,
+                model=model,
+            )
+            return service_class(
+                params=params,
+                one_shot_selected_tools=tools,
+            )
         else:
             # For Gemini Live and others, use base class implementation
             return super()._create_llm(service_class, model)
@@ -357,7 +385,9 @@ class RealtimePipeline(BasePipeline):
         self.assistant_shim.clear_buffer()
         # Set grace period to ignore stale TTSStoppedFrame events that arrive after reconnection
         self.reconnection_grace_until = time.monotonic() + 10.0
-        logger.info(f"Set reconnection grace period until {self.reconnection_grace_until}")
+        logger.info(
+            f"Set reconnection grace period until {self.reconnection_grace_until}"
+        )
 
     def _on_gemini_reconnected(self):
         """Called when Gemini Live reconnection completes."""
@@ -537,6 +567,7 @@ class RealtimePipeline(BasePipeline):
         # This tracks when the bot finishes "speaking" (outputting audio)
         # Increase the silence threshold from 0.35s to 2s to handle LLM pauses during generation
         import pipecat.transports.base_output as base_output_module
+
         base_output_module.BOT_VAD_STOP_SECS = 2.0
         logger.info("[AudioRecording] Set BOT_VAD_STOP_SECS to 2.0s for more reliable turn detection")
 
@@ -568,7 +599,7 @@ class RealtimePipeline(BasePipeline):
         self.task = PipelineTask(
             pipeline,
             idle_timeout_secs=45,
-            idle_timeout_frames=(MetricsFrame,),
+            idle_timeout_frames=(InputAudioRawFrame, OutputAudioRawFrame, MetricsFrame),
             params=PipelineParams(
                 enable_metrics=True,
                 enable_usage_metrics=True,
@@ -583,9 +614,8 @@ class RealtimePipeline(BasePipeline):
 
         # For Gemini Live, push context frame to initialize the LLM with system
         # instruction and tools. This triggers ONE reconnect at startup.
-        # For OpenAI Realtime, DO NOT send a context frame - it would force an
-        # early response.create. OpenAI gets its config via session_properties
-        # at construction time.
+        # For OpenAI Realtime and Ultravox Realtime, DO NOT send a context frame -
+        # they get their config via session_properties/params at construction time.
         if self._is_gemini_live():
             await self.task.queue_frames([LLMContextFrame(self.context)])
 

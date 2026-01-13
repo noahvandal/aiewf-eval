@@ -55,13 +55,13 @@ The APIs for the Grok and AWS Nova 2 Sonic models are currently not production r
 
 Listen to full 30-turn benchmark conversations from each speech-to-speech model:
 
-| Model         | Recording                                      | Duration |
-|---------------|------------------------------------------------|----------|
-| Ultravox v0.7 | [ultravox-v0.7.mp3](samples/ultravox-v0.7.mp3) | 18:18    |
-| GPT Realtime  | [gpt-realtime.mp3](samples/gpt-realtime.mp3)   | 11:29    |
-| Grok Realtime | [grok-realtime.mp3](samples/grok-realtime.mp3) | 9:33     |
-| Gemini Live   | [gemini-live.mp3](samples/gemini-live.mp3)     | 12:27    |
-| Nova 2 Sonic  | [nova-2-sonic.mp3](samples/nova-2-sonic.mp3)   | 22:13    |
+| Model         | Recording                                      |
+|---------------|------------------------------------------------|
+| Ultravox v0.7 | [ultravox-v0.7.mp3](samples/ultravox-v0.7.mp3) |
+| GPT Realtime  | [gpt-realtime.mp3](samples/gpt-realtime.mp3)   |
+| Grok Realtime | [grok-realtime.mp3](samples/grok-realtime.mp3) |
+| Gemini Live   | [gemini-live.mp3](samples/gemini-live.mp3)     |
+| Nova 2 Sonic  | [nova-2-sonic.mp3](samples/nova-2-sonic.mp3)   |
 
 In the recordings, the left channel is the user's speech and the right channel is the model's speech. You'll hear a small audio tag (a short beep) at the start of each model speech segment. The benchmarking code adds this audio tag to make it easier to double-check track alignment and to provide a visual indicator of segment start for manually inspecting the recordings.
 

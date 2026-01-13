@@ -343,11 +343,22 @@ class GeminiLiveLLMServiceWithReconnection(GeminiLiveLLMService):
         return self._reconnecting
 
     async def _reconnect(self):
-        """Override to call callbacks before/after reconnection."""
+        """Override to call callbacks before/after reconnection.
+
+        Note: _reconnect() is called both for initial context setup (when setting
+        system_instruction or tools) and for actual session timeout reconnections.
+        We only want to trigger the callbacks for real reconnections, not initial
+        setup. We detect this by checking if _session exists - if it's None, this
+        is the initial connection, not a reconnection.
+        """
+        # Only trigger callbacks if we had an existing session (real reconnection)
+        # Not for initial context setup which also calls _reconnect
+        is_real_reconnection = self._session is not None
+
         self._reconnecting = True
 
-        # Call on_reconnecting callback
-        if self._on_reconnecting:
+        # Call on_reconnecting callback only for real reconnections
+        if is_real_reconnection and self._on_reconnecting:
             try:
                 logger.info("GeminiLiveWithReconnection: Calling on_reconnecting callback")
                 self._on_reconnecting()
@@ -360,8 +371,8 @@ class GeminiLiveLLMServiceWithReconnection(GeminiLiveLLMService):
         finally:
             self._reconnecting = False
 
-        # Call on_reconnected callback
-        if self._on_reconnected:
+        # Call on_reconnected callback only for real reconnections
+        if is_real_reconnection and self._on_reconnected:
             try:
                 logger.info("GeminiLiveWithReconnection: Calling on_reconnected callback")
                 self._on_reconnected()

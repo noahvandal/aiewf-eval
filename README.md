@@ -97,6 +97,8 @@ cd multi-turn-eval
 uv sync
 ```
 
+On Intel macOS (`x86_64`), `torch`/`torchaudio` wheels for the latest versions are not published. The project skips those dependencies on that platform so `uv sync` can complete normally.
+
 ## Environment Variables
 
 Set the appropriate API keys for the services you want to use:

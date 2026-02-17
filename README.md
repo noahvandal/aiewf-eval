@@ -166,12 +166,18 @@ uv run multi-turn-eval run aiwf_medium_context --model gpt-4o --service openai -
 uv run multi-turn-eval run aiwf_medium_context --model moonshotai/kimi-k2-instruct-0905 --service openrouter --runs 10
 ```
 
+Each run now also writes `native_summary.json` in the run directory (computed directly from `transcript.jsonl`, no judge required). When `--runs` is greater than 1, a single parent run directory is created with per-iteration outputs under `iterations/run_XX/`, plus `native_aggregate.json` in the parent directory.
+
 ### Judging Runs
 
 After a benchmark run completes, judge the results using Claude:
 
 ```bash
 # Judge a specific run
+uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-sonnet-4-5
+
+# If the run was executed with --runs > 1, judge the parent run directory.
+# The CLI judges each iterations/run_XX/ folder and writes an aggregate claude_summary.json at the parent.
 uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-sonnet-4-5
 
 # Judge with specific turns

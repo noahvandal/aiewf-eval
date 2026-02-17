@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import statistics
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -157,6 +158,196 @@ def setup_logging(run_dir: Path, verbose: bool = False):
     )
 
 
+def _p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    if len(values) >= 20:
+        return statistics.quantiles(values, n=20)[18]
+    return max(values)
+
+
+def _summarize_numeric(values: list[float]) -> dict:
+    if not values:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "p95": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "count": len(values),
+        "mean": statistics.mean(values),
+        "median": statistics.median(values),
+        "p95": _p95(values),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def write_native_summary(run_dir: Path, model: str) -> dict | None:
+    """Write native summary from transcript.jsonl to native_summary.json."""
+    transcript_path = run_dir / "transcript.jsonl"
+    if not transcript_path.exists():
+        return None
+
+    rows = []
+    with transcript_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not rows:
+        return None
+
+    ttfb_values = []
+    latency_values = []
+    tool_call_turns = 0
+    tool_calls_total = 0
+    empty_assistant_turns = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    for r in rows:
+        ttfb = r.get("ttfb_ms")
+        if isinstance(ttfb, (int, float)):
+            ttfb_values.append(float(ttfb))
+
+        latency = r.get("latency_ms")
+        if isinstance(latency, (int, float)):
+            latency_values.append(float(latency))
+
+        tool_calls = r.get("tool_calls") or []
+        if tool_calls:
+            tool_call_turns += 1
+            tool_calls_total += len(tool_calls)
+
+        assistant_text = r.get("assistant_text")
+        if not isinstance(assistant_text, str) or not assistant_text.strip():
+            empty_assistant_turns += 1
+
+        tokens = r.get("tokens") or {}
+        prompt_tokens += int(tokens.get("prompt_tokens") or 0)
+        completion_tokens += int(tokens.get("completion_tokens") or 0)
+        total_tokens += int(tokens.get("total_tokens") or 0)
+
+    turns = len(rows)
+    summary = {
+        "model_name": model,
+        "run_dir": str(run_dir),
+        "turns": turns,
+        "native_performance": {
+            "tool_call_turns": tool_call_turns,
+            "tool_calls_total": tool_calls_total,
+            "empty_assistant_turns": empty_assistant_turns,
+            "assistant_response_rate": (
+                (turns - empty_assistant_turns) / turns if turns else None
+            ),
+        },
+        "ttfb_ms": _summarize_numeric(ttfb_values),
+        "latency_ms": _summarize_numeric(latency_values),
+        "tokens": {
+            "prompt_total": prompt_tokens,
+            "completion_total": completion_tokens,
+            "total": total_tokens,
+            "avg_total_per_turn": (total_tokens / turns) if turns else None,
+        },
+    }
+
+    out_path = run_dir / "native_summary.json"
+    out_path.write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def write_native_aggregate(
+    output_dir: Path,
+    benchmark_name: str,
+    model: str,
+    run_dirs: list[Path],
+    summaries: list[dict],
+) -> Path | None:
+    """Write aggregate native summary for a multi-run invocation."""
+    if not run_dirs or not summaries:
+        return None
+
+    ttfb_values = []
+    latency_values = []
+    total_turns = 0
+    tool_call_turns = 0
+    tool_calls_total = 0
+    empty_assistant_turns = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    for s in summaries:
+        total_turns += int(s.get("turns", 0))
+        native_perf = s.get("native_performance", {})
+        tool_call_turns += int(native_perf.get("tool_call_turns", 0))
+        tool_calls_total += int(native_perf.get("tool_calls_total", 0))
+        empty_assistant_turns += int(native_perf.get("empty_assistant_turns", 0))
+
+        tokens = s.get("tokens", {})
+        prompt_tokens += int(tokens.get("prompt_total", 0))
+        completion_tokens += int(tokens.get("completion_total", 0))
+        total_tokens += int(tokens.get("total", 0))
+
+        transcript_path = Path(s["run_dir"]) / "transcript.jsonl"
+        if not transcript_path.exists():
+            continue
+        with transcript_path.open() as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ttfb = row.get("ttfb_ms")
+                if isinstance(ttfb, (int, float)):
+                    ttfb_values.append(float(ttfb))
+                latency = row.get("latency_ms")
+                if isinstance(latency, (int, float)):
+                    latency_values.append(float(latency))
+
+    aggregate = {
+        "model_name": model,
+        "benchmark": benchmark_name,
+        "runs": len(run_dirs),
+        "run_dirs": [str(d) for d in run_dirs],
+        "turns": total_turns,
+        "native_performance": {
+            "tool_call_turns": tool_call_turns,
+            "tool_calls_total": tool_calls_total,
+            "empty_assistant_turns": empty_assistant_turns,
+            "assistant_response_rate": (
+                (total_turns - empty_assistant_turns) / total_turns
+                if total_turns
+                else None
+            ),
+        },
+        "ttfb_ms": _summarize_numeric(ttfb_values),
+        "latency_ms": _summarize_numeric(latency_values),
+        "tokens": {
+            "prompt_total": prompt_tokens,
+            "completion_total": completion_tokens,
+            "total": total_tokens,
+            "avg_total_per_turn": (total_tokens / total_turns) if total_turns else None,
+        },
+    }
+
+    out_path = output_dir / "native_aggregate.json"
+    out_path.write_text(json.dumps(aggregate, indent=2) + "\n")
+    return out_path
+
+
 # ============================================================================
 # CLI Commands
 # ============================================================================
@@ -241,14 +432,26 @@ async def _run(
         turn_indices = [int(i.strip()) for i in only_turns.split(",")]
         click.echo(f"Running only turns: {turn_indices}")
 
+    base_run_dir = create_run_directory(benchmark_name, model)
+    click.echo(f"Output directory: {base_run_dir}")
+    if runs > 1:
+        iterations_base = base_run_dir / "iterations"
+        iterations_base.mkdir(parents=True, exist_ok=True)
+    else:
+        iterations_base = None
+
     completed_runs: list[Path] = []
+    native_summaries: list[dict] = []
     for run_index in range(1, runs + 1):
         if runs > 1:
             click.echo(f"\n=== Run {run_index}/{runs} ===")
 
-        # Create output directory
-        run_dir = create_run_directory(benchmark_name, model)
-        click.echo(f"Output directory: {run_dir}")
+        if runs > 1:
+            run_dir = iterations_base / f"run_{run_index:02d}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            click.echo(f"Iteration directory: {run_dir}")
+        else:
+            run_dir = base_run_dir
 
         # Setup logging
         setup_logging(run_dir, verbose)
@@ -272,6 +475,10 @@ async def _run(
             completed_runs.append(run_dir)
             click.echo("Completed benchmark run")
             click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
+            native_summary = write_native_summary(run_dir, model)
+            if native_summary is not None:
+                native_summaries.append(native_summary)
+                click.echo(f"  Native summary: {run_dir / 'native_summary.json'}")
         except Exception as e:
             logger.exception(f"Pipeline failed: {e}")
             raise click.ClickException(str(e))
@@ -279,9 +486,18 @@ async def _run(
             recorder.close()
 
     if runs > 1:
-        click.echo("\nCompleted run directories:")
+        aggregate_path = write_native_aggregate(
+            output_dir=base_run_dir,
+            benchmark_name=benchmark_name,
+            model=model,
+            run_dirs=completed_runs,
+            summaries=native_summaries,
+        )
+        click.echo("\nCompleted iteration directories:")
         for run_dir in completed_runs:
             click.echo(f"  - {run_dir}")
+        if aggregate_path is not None:
+            click.echo(f"Native aggregate: {aggregate_path}")
 
 
 @cli.command()
@@ -303,18 +519,13 @@ def judge(
     """
     run_path = Path(run_dir)
 
-    # Infer benchmark from path: runs/{benchmark}/{timestamp}_{model}/
-    benchmark_name = run_path.parent.name
-
-    # Load transcript
-    transcript_path = run_path / "transcript.jsonl"
-    if not transcript_path.exists():
-        raise click.UsageError(f"No transcript found at {transcript_path}")
-
     # Parse turn indices
     turn_indices_set: Optional[set[int]] = None
     if only_turns:
         turn_indices_set = {int(i.strip()) for i in only_turns.split(",")}
+
+    # Infer benchmark from path: runs/{benchmark}/{timestamp}_{model}/
+    benchmark_name = run_path.parent.name
 
     # Load benchmark for expected turns
     try:
@@ -329,50 +540,140 @@ def judge(
     # Run judge
     from multi_turn_eval.judging.claude_judge import judge_with_claude, load_transcript, write_outputs
 
-    records = load_transcript(run_path)
-    if turn_indices_set is not None:
-        records = [r for r in records if r["turn"] in turn_indices_set]
+    def judge_one(run_path_single: Path) -> dict:
+        transcript_path_single = run_path_single / "transcript.jsonl"
+        if not transcript_path_single.exists():
+            raise click.UsageError(f"No transcript found at {transcript_path_single}")
 
-    try:
-        result = asyncio.run(
-            judge_with_claude(
-                run_path,
-                only_turns=turn_indices_set,
-                debug=debug,
-                expected_turns=expected_turns,
+        records = load_transcript(run_path_single)
+        if turn_indices_set is not None:
+            records = [r for r in records if r["turn"] in turn_indices_set]
+
+        try:
+            result = asyncio.run(
+                judge_with_claude(
+                    run_path_single,
+                    only_turns=turn_indices_set,
+                    debug=debug,
+                    expected_turns=expected_turns,
+                )
             )
+        except Exception as e:
+            raise click.ClickException(f"Judgment failed for {run_path_single}: {e}")
+
+        write_outputs(
+            run_path_single,
+            records,
+            result["judgments"],
+            result["summary"],
+            result["model_name"],
+            result.get("realignment_notes", ""),
+            result.get("function_tracking", {}),
+            result.get("turn_taking_analysis"),
         )
-    except Exception as e:
-        raise click.ClickException(f"Judgment failed: {e}")
 
-    # Write outputs
-    write_outputs(
-        run_path,
-        records,
-        result["judgments"],
-        result["summary"],
-        result["model_name"],
-        result.get("realignment_notes", ""),
-        result.get("function_tracking", {}),
-        result.get("turn_taking_analysis"),
+        summary_path_single = run_path_single / "claude_summary.json"
+        return json.loads(summary_path_single.read_text())
+
+    transcript_path = run_path / "transcript.jsonl"
+    if transcript_path.exists():
+        # Single-run directory (legacy and runs=1 behavior)
+        summary = judge_one(run_path)
+        passes = summary.get("claude_passes", {})
+        total = summary.get("turns_scored", 0)
+
+        click.echo(f"Judged {total} turns (with turn-taking analysis)")
+        click.echo(f"  Turn-taking: {passes.get('turn_taking', total)}/{total}")
+        click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{total}")
+        click.echo(f"  Instruction following: {passes.get('instruction_following', 0)}/{total}")
+        click.echo(f"  KB grounding: {passes.get('kb_grounding', 0)}/{total}")
+
+        turn_taking_failures = summary.get("turn_taking_failures", [])
+        if turn_taking_failures:
+            click.echo(f"\nTurn-taking failures: {turn_taking_failures}")
+        return
+
+    # Parent directory with iterations/run_XX
+    iterations_dir = run_path / "iterations"
+    iteration_dirs = []
+    if iterations_dir.exists():
+        iteration_dirs = sorted(
+            [
+                d
+                for d in iterations_dir.iterdir()
+                if d.is_dir() and (d / "transcript.jsonl").exists()
+            ]
+        )
+
+    if not iteration_dirs:
+        raise click.UsageError(
+            f"No transcript found at {transcript_path} and no iteration transcripts under {iterations_dir}"
+        )
+
+    click.echo(f"Found {len(iteration_dirs)} iterations. Judging each run...")
+    iteration_summaries: list[dict] = []
+    for idx, iteration_dir in enumerate(iteration_dirs, start=1):
+        click.echo(f"\n[{idx}/{len(iteration_dirs)}] {iteration_dir.name}")
+        summary = judge_one(iteration_dir)
+        iteration_summaries.append(summary)
+
+    # Aggregate judged output at parent run dir so tools can parse this path directly.
+    pass_keys = ["turn_taking", "tool_use_correct", "instruction_following", "kb_grounding"]
+    total_turns = sum(int(s.get("turns_scored", 0)) for s in iteration_summaries)
+    aggregate_passes = {
+        key: sum(int(s.get("claude_passes", {}).get(key, 0)) for s in iteration_summaries)
+        for key in pass_keys
+    }
+    aggregate_failures = []
+    turn_taking_affected_instruction = 0
+    for s, d in zip(iteration_summaries, iteration_dirs):
+        for t in s.get("turn_taking_failures", []):
+            aggregate_failures.append({"run": d.name, "turn": t})
+        turn_taking_affected_instruction += int(s.get("turn_taking_affected_instruction", 0))
+
+    aggregate_summary = {
+        "model_name": iteration_summaries[0].get("model_name"),
+        "claude_passes": aggregate_passes,
+        "turns_scored": total_turns,
+        "judge_version": "claude-agent-sdk-v4-turn-taking-aggregate",
+        "judge_model": judge_model,
+        "judged_at": datetime.utcnow().isoformat() + "Z",
+        "is_aggregate": True,
+        "iteration_count": len(iteration_dirs),
+        "iterations": [d.name for d in iteration_dirs],
+        "turn_taking_failures": aggregate_failures,
+        "turn_taking_affected_instruction": turn_taking_affected_instruction,
+    }
+
+    (run_path / "claude_summary.json").write_text(json.dumps(aggregate_summary, indent=2) + "\n")
+
+    analysis_lines = [
+        "# Claude Aggregate Evaluation",
+        "",
+        f"**Parent Run**: `{run_path}`",
+        f"**Iterations**: {len(iteration_dirs)}",
+        f"**Turns Scored**: {total_turns}",
+        "",
+        "## Aggregate Metrics",
+        "",
+        f"- **Turn-Taking**: {aggregate_passes['turn_taking']}/{total_turns}",
+        f"- **Tool Use Correct**: {aggregate_passes['tool_use_correct']}/{total_turns}",
+        f"- **Instruction Following**: {aggregate_passes['instruction_following']}/{total_turns}",
+        f"- **KB Grounding**: {aggregate_passes['kb_grounding']}/{total_turns}",
+        "",
+        "Per-iteration outputs remain in `iterations/run_XX/`.",
+    ]
+    (run_path / "claude_analysis.md").write_text("\n".join(analysis_lines) + "\n")
+
+    click.echo(f"\nJudged {len(iteration_dirs)} iterations at parent path")
+    click.echo(f"  Summary: {run_path / 'claude_summary.json'}")
+    click.echo(f"  Analysis: {run_path / 'claude_analysis.md'}")
+    click.echo(f"  Turn-taking: {aggregate_passes.get('turn_taking', total_turns)}/{total_turns}")
+    click.echo(f"  Tool use: {aggregate_passes.get('tool_use_correct', 0)}/{total_turns}")
+    click.echo(
+        f"  Instruction following: {aggregate_passes.get('instruction_following', 0)}/{total_turns}"
     )
-
-    # Print summary
-    summary_path = run_path / "claude_summary.json"
-    summary = json.loads(summary_path.read_text())
-    passes = summary.get("claude_passes", {})
-    total = summary.get("turns_scored", 0)
-
-    click.echo(f"Judged {total} turns (with turn-taking analysis)")
-    click.echo(f"  Turn-taking: {passes.get('turn_taking', total)}/{total}")
-    click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{total}")
-    click.echo(f"  Instruction following: {passes.get('instruction_following', 0)}/{total}")
-    click.echo(f"  KB grounding: {passes.get('kb_grounding', 0)}/{total}")
-
-    # Report turn-taking failures if any
-    turn_taking_failures = summary.get("turn_taking_failures", [])
-    if turn_taking_failures:
-        click.echo(f"\nTurn-taking failures: {turn_taking_failures}")
+    click.echo(f"  KB grounding: {aggregate_passes.get('kb_grounding', 0)}/{total_turns}")
 
 
 @cli.command("list-benchmarks")

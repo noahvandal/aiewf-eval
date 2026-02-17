@@ -615,6 +615,8 @@ def judge(
             f"No transcript found at {transcript_path} and no iteration transcripts under {iterations_dir}"
         )
 
+    all_iteration_dirs = list(iteration_dirs)
+
     if only_runs:
         selected: set[str] = set()
         for raw in only_runs.split(","):
@@ -632,7 +634,12 @@ def judge(
             )
         iteration_dirs = filtered
 
-    click.echo(f"Found {len(iteration_dirs)} iterations. Judging each run...")
+    if only_runs:
+        click.echo(
+            f"Found {len(all_iteration_dirs)} iterations total. Judging {len(iteration_dirs)} selected runs..."
+        )
+    else:
+        click.echo(f"Found {len(iteration_dirs)} iterations. Judging each run...")
     iteration_summaries: list[dict] = []
     successful_iteration_dirs: list[Path] = []
     failed_iterations: list[dict] = []
@@ -646,33 +653,57 @@ def judge(
             failed_iterations.append({"run": iteration_dir.name, "error": str(e)})
             click.echo(f"  Failed: {e}")
 
-    if not iteration_summaries:
-        raise click.ClickException("All selected iterations failed judging; no aggregate summary written.")
+    if not iteration_summaries and only_runs:
+        click.echo("No selected iterations were successfully judged in this invocation.")
 
-    # Aggregate judged output at parent run dir so tools can parse this path directly.
+    # Aggregate judged output at parent run dir using all iteration summaries available.
+    aggregate_iteration_dirs: list[Path] = []
+    aggregate_iteration_summaries: list[dict] = []
+    unreadable_existing_summaries: list[dict] = []
+    for d in all_iteration_dirs:
+        summary_path = d / "claude_summary.json"
+        if not summary_path.exists():
+            continue
+        try:
+            aggregate_iteration_summaries.append(json.loads(summary_path.read_text()))
+            aggregate_iteration_dirs.append(d)
+        except Exception as e:
+            unreadable_existing_summaries.append({"run": d.name, "error": str(e)})
+
+    if not aggregate_iteration_summaries:
+        raise click.ClickException(
+            "No iteration claude_summary.json files available to aggregate. "
+            "Run judge on at least one iteration first."
+        )
+
     pass_keys = ["turn_taking", "tool_use_correct", "instruction_following", "kb_grounding"]
-    total_turns = sum(int(s.get("turns_scored", 0)) for s in iteration_summaries)
+    total_turns = sum(int(s.get("turns_scored", 0)) for s in aggregate_iteration_summaries)
     aggregate_passes = {
-        key: sum(int(s.get("claude_passes", {}).get(key, 0)) for s in iteration_summaries)
+        key: sum(int(s.get("claude_passes", {}).get(key, 0)) for s in aggregate_iteration_summaries)
         for key in pass_keys
     }
     aggregate_failures = []
     turn_taking_affected_instruction = 0
-    for s, d in zip(iteration_summaries, successful_iteration_dirs):
+    for s, d in zip(aggregate_iteration_summaries, aggregate_iteration_dirs):
         for t in s.get("turn_taking_failures", []):
             aggregate_failures.append({"run": d.name, "turn": t})
         turn_taking_affected_instruction += int(s.get("turn_taking_affected_instruction", 0))
 
     aggregate_summary = {
-        "model_name": iteration_summaries[0].get("model_name"),
+        "model_name": aggregate_iteration_summaries[0].get("model_name"),
         "claude_passes": aggregate_passes,
         "turns_scored": total_turns,
         "judge_version": "claude-agent-sdk-v4-turn-taking-aggregate",
         "judge_model": judge_model,
         "judged_at": datetime.utcnow().isoformat() + "Z",
         "is_aggregate": True,
-        "iteration_count": len(successful_iteration_dirs),
-        "iterations": [d.name for d in successful_iteration_dirs],
+        "iteration_count": len(aggregate_iteration_dirs),
+        "iterations": [d.name for d in aggregate_iteration_dirs],
+        "total_iterations_in_folder": len(all_iteration_dirs),
+        "missing_summary_iterations": [
+            d.name for d in all_iteration_dirs if not (d / "claude_summary.json").exists()
+        ],
+        "unreadable_summary_iterations": unreadable_existing_summaries,
         "failed_iteration_count": len(failed_iterations),
         "failed_iterations": failed_iterations,
         "turn_taking_failures": aggregate_failures,
@@ -685,9 +716,11 @@ def judge(
         "# Claude Aggregate Evaluation",
         "",
         f"**Parent Run**: `{run_path}`",
-        f"**Iterations Requested**: {len(iteration_dirs)}",
-        f"**Iterations Judged**: {len(successful_iteration_dirs)}",
+        f"**Iterations In Folder**: {len(all_iteration_dirs)}",
+        f"**Iterations Requested This Run**: {len(iteration_dirs)}",
+        f"**Iterations Judged This Run**: {len(successful_iteration_dirs)}",
         f"**Iterations Failed**: {len(failed_iterations)}",
+        f"**Iterations Included In Aggregate**: {len(aggregate_iteration_dirs)}",
         f"**Turns Scored**: {total_turns}",
         "",
         "## Aggregate Metrics",
@@ -706,15 +739,34 @@ def judge(
         analysis_lines.append("- None")
     analysis_lines.extend([
         "",
+        "## Missing/Unreadable Existing Summaries",
+        "",
+    ])
+    missing_summary_iterations = [
+        d.name for d in all_iteration_dirs if not (d / "claude_summary.json").exists()
+    ]
+    if missing_summary_iterations:
+        for name in missing_summary_iterations:
+            analysis_lines.append(f"- Missing `claude_summary.json`: `{name}`")
+    if unreadable_existing_summaries:
+        for item in unreadable_existing_summaries:
+            analysis_lines.append(f"- Unreadable summary `{item['run']}`: {item['error']}")
+    if not missing_summary_iterations and not unreadable_existing_summaries:
+        analysis_lines.append("- None")
+    analysis_lines.extend([
+        "",
         "Per-iteration outputs remain in `iterations/run_XX/`.",
     ])
     (run_path / "claude_analysis.md").write_text("\n".join(analysis_lines) + "\n")
 
-    click.echo(f"\nJudged {len(successful_iteration_dirs)}/{len(iteration_dirs)} iterations at parent path")
+    click.echo(f"\nJudged {len(successful_iteration_dirs)}/{len(iteration_dirs)} requested iterations at parent path")
     click.echo(f"  Summary: {run_path / 'claude_summary.json'}")
     click.echo(f"  Analysis: {run_path / 'claude_analysis.md'}")
     if failed_iterations:
         click.echo(f"  Failed iterations: {len(failed_iterations)}")
+    click.echo(
+        f"  Aggregate includes: {len(aggregate_iteration_dirs)}/{len(all_iteration_dirs)} iterations in folder"
+    )
     click.echo(f"  Turn-taking: {aggregate_passes.get('turn_taking', total_turns)}/{total_turns}")
     click.echo(f"  Tool use: {aggregate_passes.get('tool_use_correct', 0)}/{total_turns}")
     click.echo(

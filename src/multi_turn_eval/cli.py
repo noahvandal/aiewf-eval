@@ -503,11 +503,16 @@ async def _run(
 @cli.command()
 @click.argument("run_dir", type=click.Path(exists=True))
 @click.option("--only-turns", help="Comma-separated turn indices to judge (e.g., 0,1,2)")
+@click.option(
+    "--only-runs",
+    help="For parent run dirs: comma-separated iteration selectors (e.g., 1,3,9 or run_01,run_03)",
+)
 @click.option("--judge-model", default="claude-opus-4-5", help="Model for judging")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def judge(
     run_dir: str,
     only_turns: Optional[str],
+    only_runs: Optional[str],
     judge_model: str,
     debug: bool,
 ):
@@ -610,12 +615,39 @@ def judge(
             f"No transcript found at {transcript_path} and no iteration transcripts under {iterations_dir}"
         )
 
+    if only_runs:
+        selected: set[str] = set()
+        for raw in only_runs.split(","):
+            token = raw.strip()
+            if not token:
+                continue
+            if token.isdigit():
+                selected.add(f"run_{int(token):02d}")
+            else:
+                selected.add(token)
+        filtered = [d for d in iteration_dirs if d.name in selected]
+        if not filtered:
+            raise click.UsageError(
+                f"--only-runs matched no iteration dirs. Available: {', '.join(d.name for d in iteration_dirs)}"
+            )
+        iteration_dirs = filtered
+
     click.echo(f"Found {len(iteration_dirs)} iterations. Judging each run...")
     iteration_summaries: list[dict] = []
+    successful_iteration_dirs: list[Path] = []
+    failed_iterations: list[dict] = []
     for idx, iteration_dir in enumerate(iteration_dirs, start=1):
         click.echo(f"\n[{idx}/{len(iteration_dirs)}] {iteration_dir.name}")
-        summary = judge_one(iteration_dir)
-        iteration_summaries.append(summary)
+        try:
+            summary = judge_one(iteration_dir)
+            iteration_summaries.append(summary)
+            successful_iteration_dirs.append(iteration_dir)
+        except Exception as e:
+            failed_iterations.append({"run": iteration_dir.name, "error": str(e)})
+            click.echo(f"  Failed: {e}")
+
+    if not iteration_summaries:
+        raise click.ClickException("All selected iterations failed judging; no aggregate summary written.")
 
     # Aggregate judged output at parent run dir so tools can parse this path directly.
     pass_keys = ["turn_taking", "tool_use_correct", "instruction_following", "kb_grounding"]
@@ -626,7 +658,7 @@ def judge(
     }
     aggregate_failures = []
     turn_taking_affected_instruction = 0
-    for s, d in zip(iteration_summaries, iteration_dirs):
+    for s, d in zip(iteration_summaries, successful_iteration_dirs):
         for t in s.get("turn_taking_failures", []):
             aggregate_failures.append({"run": d.name, "turn": t})
         turn_taking_affected_instruction += int(s.get("turn_taking_affected_instruction", 0))
@@ -639,8 +671,10 @@ def judge(
         "judge_model": judge_model,
         "judged_at": datetime.utcnow().isoformat() + "Z",
         "is_aggregate": True,
-        "iteration_count": len(iteration_dirs),
-        "iterations": [d.name for d in iteration_dirs],
+        "iteration_count": len(successful_iteration_dirs),
+        "iterations": [d.name for d in successful_iteration_dirs],
+        "failed_iteration_count": len(failed_iterations),
+        "failed_iterations": failed_iterations,
         "turn_taking_failures": aggregate_failures,
         "turn_taking_affected_instruction": turn_taking_affected_instruction,
     }
@@ -651,7 +685,9 @@ def judge(
         "# Claude Aggregate Evaluation",
         "",
         f"**Parent Run**: `{run_path}`",
-        f"**Iterations**: {len(iteration_dirs)}",
+        f"**Iterations Requested**: {len(iteration_dirs)}",
+        f"**Iterations Judged**: {len(successful_iteration_dirs)}",
+        f"**Iterations Failed**: {len(failed_iterations)}",
         f"**Turns Scored**: {total_turns}",
         "",
         "## Aggregate Metrics",
@@ -661,13 +697,24 @@ def judge(
         f"- **Instruction Following**: {aggregate_passes['instruction_following']}/{total_turns}",
         f"- **KB Grounding**: {aggregate_passes['kb_grounding']}/{total_turns}",
         "",
-        "Per-iteration outputs remain in `iterations/run_XX/`.",
+        "## Failed Iterations",
+        "",
     ]
+    if failed_iterations:
+        analysis_lines.extend([f"- `{f['run']}`: {f['error']}" for f in failed_iterations])
+    else:
+        analysis_lines.append("- None")
+    analysis_lines.extend([
+        "",
+        "Per-iteration outputs remain in `iterations/run_XX/`.",
+    ])
     (run_path / "claude_analysis.md").write_text("\n".join(analysis_lines) + "\n")
 
-    click.echo(f"\nJudged {len(iteration_dirs)} iterations at parent path")
+    click.echo(f"\nJudged {len(successful_iteration_dirs)}/{len(iteration_dirs)} iterations at parent path")
     click.echo(f"  Summary: {run_path / 'claude_summary.json'}")
     click.echo(f"  Analysis: {run_path / 'claude_analysis.md'}")
+    if failed_iterations:
+        click.echo(f"  Failed iterations: {len(failed_iterations)}")
     click.echo(f"  Turn-taking: {aggregate_passes.get('turn_taking', total_turns)}/{total_turns}")
     click.echo(f"  Tool use: {aggregate_passes.get('tool_use_correct', 0)}/{total_turns}")
     click.echo(

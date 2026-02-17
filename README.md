@@ -180,6 +180,9 @@ uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-son
 # The CLI judges each iterations/run_XX/ folder and writes an aggregate claude_summary.json at the parent.
 uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-sonnet-4-5
 
+# Judge only specific iterations from a parent run (and still write aggregate summary at parent)
+uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-sonnet-4-5 --only-runs 1,3,9
+
 # Judge with specific turns
 uv run multi-turn-eval judge runs/aiwf_medium_context/20251213T123456_claude-sonnet-4-5 --only-turns 0,1,2
 

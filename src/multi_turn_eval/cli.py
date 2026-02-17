@@ -177,6 +177,13 @@ def cli():
     help="Pipeline type (text, realtime, nova-sonic). Auto-detected if not specified.",
 )
 @click.option("--only-turns", help="Comma-separated turn indices to run (e.g., 0,1,2)")
+@click.option(
+    "--runs",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of full benchmark runs to execute sequentially",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(
     benchmark_name: str,
@@ -184,6 +191,7 @@ def run(
     service: Optional[str],
     pipeline: Optional[str],
     only_turns: Optional[str],
+    runs: int,
     verbose: bool,
 ):
     """Run a benchmark against an LLM.
@@ -193,7 +201,7 @@ def run(
         uv run multi-turn-eval run aiwf_medium_context --model gpt-4o --service openai
         uv run multi-turn-eval run aiwf_medium_context --model gpt-realtime --service openai-realtime --pipeline realtime
     """
-    asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, verbose))
+    asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, runs, verbose))
 
 
 async def _run(
@@ -202,12 +210,15 @@ async def _run(
     service: Optional[str],
     pipeline_type: Optional[str],
     only_turns: Optional[str],
-    verbose: bool,
+    runs: int = 1,
+    verbose: bool = False,
 ):
     """Async implementation of the run command."""
+    if runs < 1:
+        raise click.UsageError("--runs must be >= 1")
+
     # Load benchmark
     BenchmarkConfig = load_benchmark(benchmark_name)
-    benchmark = BenchmarkConfig()
 
     # Infer pipeline if not specified
     if not pipeline_type:
@@ -224,41 +235,53 @@ async def _run(
     # Load service class if provided
     service_class = load_service_class(service) if service else None
 
-    # Create output directory
-    run_dir = create_run_directory(benchmark_name, model)
-    click.echo(f"Output directory: {run_dir}")
-
-    # Setup logging
-    setup_logging(run_dir, verbose)
-
-    # Create recorder
-    from multi_turn_eval.recording.transcript_recorder import TranscriptRecorder
-
-    recorder = TranscriptRecorder(run_dir, model)
-
     # Parse turn indices if provided
     turn_indices = None
     if only_turns:
         turn_indices = [int(i.strip()) for i in only_turns.split(",")]
         click.echo(f"Running only turns: {turn_indices}")
 
-    # Run the pipeline
-    try:
-        pipeline_instance = pipeline_cls(benchmark)
-        await pipeline_instance.run(
-            recorder=recorder,
-            model=model,
-            service_class=service_class,
-            service_name=service,
-            turn_indices=turn_indices,
-        )
-        click.echo(f"Completed benchmark run")
-        click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
-    except Exception as e:
-        logger.exception(f"Pipeline failed: {e}")
-        raise click.ClickException(str(e))
-    finally:
-        recorder.close()
+    completed_runs: list[Path] = []
+    for run_index in range(1, runs + 1):
+        if runs > 1:
+            click.echo(f"\n=== Run {run_index}/{runs} ===")
+
+        # Create output directory
+        run_dir = create_run_directory(benchmark_name, model)
+        click.echo(f"Output directory: {run_dir}")
+
+        # Setup logging
+        setup_logging(run_dir, verbose)
+
+        # Create recorder
+        from multi_turn_eval.recording.transcript_recorder import TranscriptRecorder
+
+        recorder = TranscriptRecorder(run_dir, model)
+
+        # Run the pipeline
+        try:
+            benchmark = BenchmarkConfig()
+            pipeline_instance = pipeline_cls(benchmark)
+            await pipeline_instance.run(
+                recorder=recorder,
+                model=model,
+                service_class=service_class,
+                service_name=service,
+                turn_indices=turn_indices,
+            )
+            completed_runs.append(run_dir)
+            click.echo("Completed benchmark run")
+            click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
+        except Exception as e:
+            logger.exception(f"Pipeline failed: {e}")
+            raise click.ClickException(str(e))
+        finally:
+            recorder.close()
+
+    if runs > 1:
+        click.echo("\nCompleted run directories:")
+        for run_dir in completed_runs:
+            click.echo(f"  - {run_dir}")
 
 
 @cli.command()
